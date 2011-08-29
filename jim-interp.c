@@ -4,110 +4,89 @@
 #include "jimautoconf.h"
 #include "jim-subcmd.h"
 
-struct InterpInfo
-{
-    Jim_Interp *interp;
-};
-
 static void JimInterpDelProc(Jim_Interp *interp, void *privData)
 {
-    struct InterpInfo *iis = privData;
-
-    Jim_FreeInterp(iis->interp);
-    Jim_Free(iis);
+    Jim_FreeInterp((Jim_Interp *)privData);
 }
 
-static int JimInterpCrossInterpEval(Jim_Interp *target, Jim_Interp *source, Jim_Obj *scriptObj)
+/* Everything passing between interpreters must be converted to a string */
+static Jim_Obj *JimInterpCopyObj(Jim_Interp *target, Jim_Obj *obj)
 {
-    int ret;
+    const char *rep;
     int len;
-    Jim_Obj *targetScriptObj;
-    const char *script;
 
-    /* Create a string copy of the script in the target interp */
-    script = Jim_GetString(scriptObj, &len);
-    targetScriptObj = Jim_NewStringObj(target, script, len);
-
-    /* Evaluate it */
-    Jim_IncrRefCount(targetScriptObj);
-    ret = Jim_EvalObj(target, targetScriptObj);
-    Jim_DecrRefCount(target, targetScriptObj);
-
-    /* And extract the result */
-    Jim_SetResultString(source, Jim_String(Jim_GetResult(target)), -1);
-
-    return ret;
+    rep = Jim_GetString(obj, &len);
+    return Jim_NewStringObj(target, rep, len);
 }
+
+#define JimInterpCopyResult(to, from) Jim_SetResult((to), JimInterpCopyObj((to), Jim_GetResult((from))))
 
 static int interp_cmd_eval(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
     int ret;
-    Jim_Interp *subinterp = ((struct InterpInfo *)Jim_CmdPrivData(interp))->interp;
+    Jim_Interp *child = Jim_CmdPrivData(interp);
+    Jim_Obj *scriptObj, *targetScriptObj;
 
-    /* Evaluate the command in the given interpreter.
-     * Everything passing between the two interpreters must be converted to
-     * a string first.
-     */
-    Jim_Obj *scriptStringObj = Jim_ConcatObj(interp, argc, argv);
+    scriptObj = Jim_ConcatObj(interp, argc, argv);
+    targetScriptObj = JimInterpCopyObj(child, scriptObj);
+    Jim_FreeNewObj(interp, scriptObj);
 
-    ret = JimInterpCrossInterpEval(subinterp, interp, scriptStringObj);
+    Jim_IncrRefCount(targetScriptObj);
+    ret = Jim_EvalObj(child, targetScriptObj); 
+    Jim_DecrRefCount(child, targetScriptObj);
 
-    Jim_FreeNewObj(interp, scriptStringObj);
-
+    JimInterpCopyResult(interp, child);
     return ret;
 }
 
 static int interp_cmd_delete(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    return Jim_RenameCommand(interp, Jim_String(argv[0]), "");
+    return Jim_DeleteCommand(interp, Jim_String(argv[0]));
 }
 
-static void JimInterpDelObj(Jim_Interp *interp, void *privData)
+static void JimInterpDelAlias(Jim_Interp *interp, void *privData)
 {
-    Jim_DecrRefCount(interp, (Jim_Obj *)privData);
-}
-
-static int JimInterpSubCmdAlias(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
-{
-    int ret;
-    int i;
     Jim_Interp *parent = Jim_GetAssocData(interp, "interp.parent");
-    Jim_Obj *aliasPrefixList = Jim_CmdPrivData(interp);
-    Jim_Obj *cmdList;
+    Jim_DecrRefCount(parent, (Jim_Obj *)privData);
+}
+
+static int JimInterpAliasProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
+{
+    int i, ret;
+    Jim_Interp *parent = Jim_GetAssocData(interp, "interp.parent");
+    Jim_Obj *targetPrefixObj = Jim_CmdPrivData(interp);
+    Jim_Obj *targetScriptObj;
 
     assert(parent);
 
     /* Build the complete command */
-    cmdList = Jim_DuplicateObj(interp, aliasPrefixList);
-
+    targetScriptObj = Jim_DuplicateObj(parent, targetPrefixObj);
     for (i = 1; i < argc; i++) {
-        Jim_ListAppendElement(interp, cmdList, argv[i]);
+        Jim_ListAppendElement(parent, targetScriptObj,
+            JimInterpCopyObj(parent, argv[i]));
     }
 
-    ret = JimInterpCrossInterpEval(parent, interp, cmdList);
+    Jim_IncrRefCount(targetScriptObj);
+    ret = Jim_EvalObj(parent, targetScriptObj);
+    Jim_DecrRefCount(parent, targetScriptObj);
 
-    Jim_FreeNewObj(interp, cmdList);
-
+    JimInterpCopyResult(interp, parent);
     return ret;
 }
 
 static int interp_cmd_alias(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    int i;
-    Jim_Interp *subinterp = ((struct InterpInfo *)Jim_CmdPrivData(interp))->interp;
+    Jim_Interp *child = Jim_CmdPrivData(interp);
     Jim_Obj *aliasPrefixList;
 
-    /* Create a prefix list in subinterp from argv[1...] */
-    aliasPrefixList = Jim_NewListObj(subinterp, NULL, 0);
-    for (i = 1; i < argc; i++) {
-        Jim_ListAppendElement(subinterp, aliasPrefixList,
-            Jim_NewStringObj(subinterp, Jim_String(argv[i]), -1));
-    }
+    /* The prefix list will be held inside the child, but it still belongs
+     * to the parent!
+     */
 
+    aliasPrefixList = Jim_NewListObj(interp, argv + 1, argc - 1);
     Jim_IncrRefCount(aliasPrefixList);
 
-    /* Create the command in the sub interpreter with the prefix list as the privdata */
-    Jim_CreateCommand(subinterp, Jim_String(argv[0]), JimInterpSubCmdAlias, aliasPrefixList, JimInterpDelObj);
+    Jim_CreateCommand(child, Jim_String(argv[0]), JimInterpAliasProc, aliasPrefixList, JimInterpDelAlias);
     return JIM_OK;
 }
 
@@ -125,11 +104,11 @@ static const jim_subcmd_type interp_command_table[] = {
         .description = "Delete this interpreter"
     },
     {   .cmd = "alias",
-        .args = "slavecmd mastercmd ...",
+        .args = "childcmd parentcmd ?arg ...?",
         .function = interp_cmd_alias,
         .minargs = 2,
         .maxargs = -1,
-        .description = "Create an alias which refers to a command in the parent interpreter"
+        .description = "Create an alias which refers to a script in the parent interpreter"
     },
     { 0 }
 };
@@ -144,12 +123,7 @@ static void JimInterpCopyVariable(Jim_Interp *target, Jim_Interp *source, const 
     Jim_Obj *value = Jim_GetGlobalVariableStr(source, var, JIM_NONE);
     const char *str;
 
-    if (value) {
-        str = Jim_String(value);
-    }
-    else {
-        str = default_value;
-    }
+    str = value ? Jim_String(value) : default_value;
     if (str) {
         Jim_SetGlobalVariableStr(target, var, Jim_NewStringObj(target, str, -1));
     }
@@ -160,7 +134,7 @@ static void JimInterpCopyVariable(Jim_Interp *target, Jim_Interp *source, const 
  */
 static int JimInterpCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    struct InterpInfo *iis;
+    Jim_Interp *child;
     char buf[32];
 
     if (argc != 1) {
@@ -169,22 +143,21 @@ static int JimInterpCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
     }
 
     /* Create the interpreter command */
-    iis = Jim_Alloc(sizeof(*iis));
-    iis->interp = Jim_CreateInterp();
-    Jim_RegisterCoreCommands(iis->interp);
-    Jim_InitStaticExtensions(iis->interp);
+    child = Jim_CreateInterp();
+    Jim_RegisterCoreCommands(child);
+    Jim_InitStaticExtensions(child);
 
     /* Copy some core variables to the new interpreter */
-    JimInterpCopyVariable(iis->interp, interp, "argv", "");
-    JimInterpCopyVariable(iis->interp, interp, "argc", "0");
-    JimInterpCopyVariable(iis->interp, interp, "argv0", NULL);
-    JimInterpCopyVariable(iis->interp, interp, "jim_argv0", NULL);
+    JimInterpCopyVariable(child, interp, "argv", "");
+    JimInterpCopyVariable(child, interp, "argc", "0");
+    JimInterpCopyVariable(child, interp, "argv0", NULL);
+    JimInterpCopyVariable(child, interp, "jim_argv0", NULL);
 
-    /* Allow the slave interpreter to find the parent */
-    Jim_SetAssocData(iis->interp, "interp.parent", NULL, interp);
+    /* Allow the child interpreter to find the parent */
+    Jim_SetAssocData(child, "interp.parent", NULL, interp);
 
     snprintf(buf, sizeof(buf), "interp.handle%ld", Jim_GetId(interp));
-    Jim_CreateCommand(interp, buf, JimInterpSubCmdProc, iis, JimInterpDelProc);
+    Jim_CreateCommand(interp, buf, JimInterpSubCmdProc, child, JimInterpDelProc);
     Jim_SetResultString(interp, buf, -1);
     return JIM_OK;
 }
