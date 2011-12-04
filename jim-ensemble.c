@@ -1,5 +1,4 @@
 #include <string.h>
-#include <stdio.h>
 
 #include "jimautoconf.h"
 #include "jim.h"
@@ -47,9 +46,16 @@ static Jim_ObjType selectorObjType = {
 
 typedef struct JimEnsemble {
     long magic;
+    Jim_Obj *unknownSel, *itselfSel;
 } JimEnsemble;
 
-static int SetSelectorFromAny(Jim_Interp *interp, Jim_Obj *obj, const char *baseName, JimEnsemble *base)
+static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
+    JimEnsemble *base, Jim_Obj *selObj, int flags);
+static JimEnsemble *JimGetEnsemble(Jim_Interp *interp, Jim_Obj *cmdObj);
+int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv);
+
+static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
+    JimEnsemble *base, Jim_Obj *selObj, int flags)
 {
     const char *selName;
     char *name;
@@ -57,7 +63,17 @@ static int SetSelectorFromAny(Jim_Interp *interp, Jim_Obj *obj, const char *base
     Jim_Obj *cmdObj;
     JimSelector *sel;
 
-    selName = Jim_GetString(obj, &selLen);
+    if (selObj->typePtr == &selectorObjType && JimSelectorValue(selObj)->magic == base->magic) {
+        cmdObj = JimSelectorValue(selObj)->cmdObj;
+        if (Jim_GetCommand(interp, cmdObj, flags) != NULL) {
+            return cmdObj;
+        } else {
+            Jim_FreeIntRep(interp, selObj);
+            return NULL;
+        }
+    }
+
+    selName = Jim_GetString(selObj, &selLen);
     baseLen = strlen(baseName);
 
     name = Jim_Alloc(baseLen + selLen + 2);
@@ -69,58 +85,76 @@ static int SetSelectorFromAny(Jim_Interp *interp, Jim_Obj *obj, const char *base
     cmdObj = Jim_NewStringObjNoAlloc(interp, name, baseLen + selLen + 1);
     Jim_IncrRefCount(cmdObj);
 
-    if (Jim_GetCommand(interp, cmdObj, JIM_ERRMSG) == NULL) {
+    if (Jim_GetCommand(interp, cmdObj, flags) == NULL) {
         Jim_DecrRefCount(interp, cmdObj);
-        return JIM_ERR;
+        return NULL;
     }
 
-    Jim_FreeIntRep(interp, obj);
-    obj->typePtr = &selectorObjType;
-    obj->internalRep.ptr = sel = Jim_Alloc(sizeof(JimSelector));
+    Jim_FreeIntRep(interp, selObj);
+    selObj->typePtr = &selectorObjType;
+    selObj->internalRep.ptr = sel = Jim_Alloc(sizeof(JimSelector));
 
     sel->refCount = 1;
     sel->magic = base->magic;
     sel->cmdObj = cmdObj; /* transfer ownership */
 
-    return JIM_OK;
+    return cmdObj;
+}
+
+static JimEnsemble *JimGetEnsemble(Jim_Interp *interp, Jim_Obj *cmdObj)
+{
+    Jim_Cmd *cmd;
+
+    cmd = Jim_GetCommand(interp, cmdObj, 0);
+    if (cmd->isproc || cmd->u.native.cmdProc != JimEnsembleCmdProc)
+        return NULL;
+
+    return cmd->u.native.privData;
 }
 
 int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
     int i;
     JimEnsemble *ens;
-    Jim_Obj *cmdObj;
-    Jim_Cmd *cmd;
+    Jim_Obj *cmdObj, *newCmdObj;
 
-    cmdObj = argv[0]; i = 1;
-    cmd = Jim_GetCommand(interp, cmdObj, 0);
-    /* assert(cmd); */
+    cmdObj = argv[0];
+    i = 1;
 
-    while (!cmd->isproc && cmd->u.native.cmdProc == JimEnsembleCmdProc) {
-        if (argc < i) {
-            Jim_WrongNumArgs(interp, 1, &cmdObj, "selector ?args ..?");
-            return JIM_ERR;
+    while ((ens = JimGetEnsemble(interp, cmdObj)) != NULL) {
+        if (i < argc) {
+            newCmdObj = JimResolveSelector(interp, Jim_String(cmdObj), ens, argv[i], JIM_ERR);
+            if (newCmdObj) {
+                cmdObj = newCmdObj;
+                i++;
+            }
+            else {
+                if (ens->unknownSel == NULL) {
+                    ens->unknownSel = Jim_NewStringObj(interp, "unknown", -1);
+                    Jim_IncrRefCount(ens->unknownSel);
+                }
+
+                cmdObj = JimResolveSelector(interp, Jim_String(cmdObj), ens, ens->unknownSel, 0);
+                if (!cmdObj)
+                    return JIM_ERR;
+            }
         }
+        else {
+            if (ens->itselfSel == NULL) {
+                ens->itselfSel = Jim_NewStringObj(interp, "itself", -1);
+                Jim_IncrRefCount(ens->itselfSel);
+            }
 
-        ens = cmd->u.native.privData;
-        if (argv[i]->typePtr != &selectorObjType || JimSelectorValue(argv[i])->magic != ens->magic) {
-            if (SetSelectorFromAny(interp, argv[i], Jim_String(cmdObj), ens) != JIM_OK)
+            newCmdObj = JimResolveSelector(interp, Jim_String(cmdObj), ens, ens->itselfSel, 0);
+            if (!newCmdObj) {
+                Jim_WrongNumArgs(interp, 1, &cmdObj, "selector ?args ...?");
                 return JIM_ERR;
+            }
+            else {
+                cmdObj = newCmdObj;
+                break;
+            }
         }
-
-        cmdObj = JimSelectorValue(argv[i])->cmdObj;
-
-        cmd = Jim_GetCommand(interp, cmdObj, JIM_ERRMSG);
-        if (cmd == NULL) {
-            /* This can happen if the proc epoch has been bumped since
-             * the cached lookup. Invalidate the cached result. */
-
-            Jim_FreeIntRep(interp, argv[i]);
-            argv[i]->typePtr = NULL;
-            return JIM_ERR;
-        }
-
-        i++;
     }
 
     return Jim_EvalObjPrefix(interp, cmdObj, argc - i, argv + i);
@@ -129,6 +163,12 @@ int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 void JimEnsembleDelProc(Jim_Interp *interp, void *privData)
 {
     JimEnsemble *ens = privData;
+
+    if (ens->unknownSel)
+        Jim_DecrRefCount(interp, ens->unknownSel);
+    if (ens->itselfSel)
+        Jim_DecrRefCount(interp, ens->itselfSel);
+
     Jim_Free(ens);
 }
 
@@ -136,6 +176,8 @@ int Jim_CreateEnsemble(Jim_Interp *interp, const char *name)
 {
     JimEnsemble *ens = Jim_Alloc(sizeof(JimEnsemble));
     ens->magic = Jim_GetId(interp);
+    ens->unknownSel = ens->itselfSel = NULL;
+
     Jim_CreateCommand(interp, name, JimEnsembleCmdProc, ens, JimEnsembleDelProc);
     return JIM_OK;
 }
@@ -147,6 +189,8 @@ int JimEnsembleCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         Jim_WrongNumArgs(interp, 1, argv, "name");
         return JIM_ERR;
     }
+
+    Jim_SetResult(interp, argv[1]);
     return Jim_CreateEnsemble(interp, Jim_String(argv[1]));
 }
 
