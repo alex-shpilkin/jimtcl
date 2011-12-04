@@ -203,7 +203,7 @@ set withmod [join [opt-val {with-mod with-jim-extmod}]]
 # Tcl extensions
 set ext_tcl "stdlib glob tclcompat tree rlprompt oo binary"
 # Native extensions
-set ext_c "load package readdir array clock exec file posix regexp signal aio eventloop pack syslog readline mk sqlite sqlite3 win32 sdl"
+set ext_c "load package readdir array clock exec file posix regexp signal aio eventloop pack syslog readline mk sqlite sqlite3 win32 sdl ensemble"
 
 # C++ extensions
 set ext_cxx "mk"
@@ -211,7 +211,7 @@ set ext_cxx "mk"
 # Tcl extensions which can be modules
 set ext_tcl_mod "glob tree rlprompt oo binary"
 # Native extensions which can be modules
-set ext_c_mod "readdir array clock file posix regexp syslog readline pack mk sqlite sqlite3 win32 sdl"
+set ext_c_mod "readdir array clock file posix regexp syslog readline pack mk sqlite sqlite3 win32 sdl ensemble"
 
 # All extensions
 set ext_all [concat $ext_c $ext_tcl]
