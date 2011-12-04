@@ -38,7 +38,7 @@ static Jim_ObjType selectorObjType = {
     FreeSelectorInternalRep,
     DupSelectorInternalRep,
     NULL,
-    JIM_TYPE_NONE
+    JIM_TYPE_REFERENCES
 };
 
 /* ------------------------------------------------------------------------
