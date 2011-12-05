@@ -567,8 +567,6 @@ typedef struct Jim_Interp {
     Jim_PrngState *prngState; /* per interpreter Random Number Gen. state. */
     struct Jim_HashTable packages; /* Provided packages hash table */
     Jim_Stack *loadHandles; /* handles of loaded modules [load] */
-    Jim_Obj *rewriteNameObj; /* Replaces the name of the current command for error reporting */
-    int rewriteNameCount; /* How many elements of the current command name to replace */
 } Jim_Interp;
 
 /* Currently provided as macro that performs the increment.
@@ -657,6 +655,11 @@ JIM_EXPORT int Jim_EvalObjPrefix(Jim_Interp *interp, Jim_Obj *prefix,
 #define Jim_EvalPrefix(i, p, oc, ov) Jim_EvalObjPrefix((i), Jim_NewStringObj((i), (p), -1), (oc), (ov))
 JIM_EXPORT int Jim_SubstObj (Jim_Interp *interp, Jim_Obj *substObjPtr,
         Jim_Obj **resObjPtrPtr, int flags);
+
+/* lookup */
+JIM_EXPORT Jim_Obj *Jim_ResolveAlias (Jim_Interp *interp, Jim_Obj *cmdObj);
+JIM_EXPORT Jim_Obj *Jim_ResolvePrefix (Jim_Interp *interp, int objc,
+    Jim_Obj *const *objv, int *lengthPtr);
 
 /* stack */
 JIM_EXPORT void Jim_InitStack(Jim_Stack *stack);
@@ -749,6 +752,8 @@ JIM_EXPORT void Jim_RegisterCoreCommands (Jim_Interp *interp);
 JIM_EXPORT int Jim_CreateCommand (Jim_Interp *interp,
         const char *cmdName, Jim_CmdProc cmdProc, void *privData,
          Jim_DelCmdProc delProc);
+JIM_EXPORT int Jim_CreateAlias (Jim_Interp *interp,
+        const char *cmdName, int objc, Jim_Obj *const *objv);
 JIM_EXPORT int Jim_DeleteCommand (Jim_Interp *interp,
         const char *cmdName);
 JIM_EXPORT int Jim_RenameCommand (Jim_Interp *interp,

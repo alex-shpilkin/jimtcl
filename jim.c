@@ -3822,6 +3822,118 @@ int Jim_RenameCommand(Jim_Interp *interp, const char *oldName, const char *newNa
 }
 
 /* -----------------------------------------------------------------------------
+ * Command aliases
+ * ---------------------------------------------------------------------------*/
+
+/* A complete alias is an alias that can be resolved to a _single_ existing
+ * command via successful ensemble lookups and other aliases only. The
+ * current implementation caches the real targets of complete aliases.
+ */
+
+typedef struct JimAlias {
+    int objc;
+    Jim_Obj **objv;
+
+    unsigned long procEpoch;
+    Jim_Obj *target;
+} JimAlias;
+
+static int JimAliasCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv);
+static void JimAliasDelProc(Jim_Interp *interp, void *privData);
+
+Jim_Obj *Jim_ResolveAlias(Jim_Interp *interp, Jim_Obj *cmdObj)
+{
+    Jim_Cmd *cmd;
+    JimAlias *alias;
+    int count;
+    Jim_Obj *target;
+
+    cmd = Jim_GetCommand(interp, cmdObj, JIM_ERR);
+    if (cmd == NULL)
+        return NULL;
+    if (cmd->isproc || cmd->u.native.cmdProc != JimAliasCmdProc)
+        return cmdObj;
+
+    alias = cmd->u.native.privData;
+    if (alias->procEpoch == interp->procEpoch)
+        return alias->target;
+
+    if (alias->target != NULL)
+        Jim_DecrRefCount(interp, alias->target);
+
+    target = Jim_ResolvePrefix(interp, alias->objc, alias->objv, &count);
+    if (count != alias->objc)
+        target = cmdObj;
+
+    if (target != NULL) {
+        alias->procEpoch = interp->procEpoch;
+        alias->target = target;
+        Jim_IncrRefCount(alias->target);
+    }
+
+    return target;
+}
+
+int JimAliasCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
+{
+    Jim_Obj *cmdObj;
+
+    cmdObj = Jim_ResolveAlias(interp, argv[0]);
+    if (cmdObj != NULL && cmdObj != argv[0]) {
+        return Jim_EvalObjPrefix(interp, cmdObj, argc - 1, argv + 1);
+    }
+    else {
+        /* Note that we can end up in an [unknown] handler */
+        JimAlias *alias = Jim_CmdPrivData(interp);
+
+        int objc;
+        Jim_Obj **objv;
+
+        objc = alias->objc + argc - 1;
+        objv = Jim_Alloc(objc * sizeof(Jim_Obj *));
+        memcpy(objv, alias->objv, alias->objc * sizeof(Jim_Obj *));
+        memcpy(objv + alias->objc, argv + 1, (argc - 1) * sizeof(Jim_Obj *));
+        return Jim_EvalObjVector(interp, objc, objv);
+    }
+}
+
+void JimAliasDelProc(Jim_Interp *interp, void *privData)
+{
+    int i;
+    JimAlias *alias = privData;
+
+    for (i = 0; i < alias->objc; i++)
+        Jim_DecrRefCount(interp, alias->objv[i]);
+    Jim_Free(alias->objv);
+
+    if (alias->target)
+        Jim_DecrRefCount(interp, alias->target);
+
+    Jim_Free(alias);
+}
+
+int Jim_CreateAlias(Jim_Interp *interp, const char *cmdName, int objc, Jim_Obj *const *objv)
+{
+    int i;
+    JimAlias *alias;
+
+    JimPanic((objc == 0, "Jim_CreateAlias called with an empty list"));
+
+    alias = Jim_Alloc(sizeof(JimAlias));
+    alias->procEpoch = 0;
+    alias->target = NULL;
+
+    alias->objc = objc;
+    alias->objv = Jim_Alloc(objc * sizeof(Jim_Obj *));
+    memcpy(alias->objv, objv, objc * sizeof(Jim_Obj *));
+    for (i = 0; i < objc; i++)
+        Jim_IncrRefCount(objv[i]);
+
+    Jim_CreateCommand(interp, cmdName, JimAliasCmdProc, alias, JimAliasDelProc);
+    return JIM_OK;
+}
+
+/* -----------------------------------------------------------------------------
  * Command object
  * ---------------------------------------------------------------------------*/
 
@@ -10207,10 +10319,6 @@ static void JimSetProcWrongArgs(Jim_Interp *interp, Jim_Obj *procNameObj, Jim_Cm
     Jim_Obj *argmsg = Jim_NewStringObj(interp, "", 0);
     int i;
 
-    if (interp->rewriteNameObj) {
-        procNameObj = interp->rewriteNameObj;
-    }
-
     for (i = 0; i < cmd->u.proc.argListLen; i++) {
         Jim_AppendString(interp, argmsg, " ", 1);
 
@@ -10698,15 +10806,7 @@ void Jim_WrongNumArgs(Jim_Interp *interp, int argc, Jim_Obj *const *argv, const 
     Jim_Obj *objPtr;
     Jim_Obj *listObjPtr;
 
-    if (interp->rewriteNameObj) {
-        argc -= interp->rewriteNameCount;
-        argv += interp->rewriteNameCount;
-        listObjPtr = Jim_NewListObj(interp, &interp->rewriteNameObj, 1);
-        ListInsertElements(listObjPtr, -1, argc, argv);
-    }
-    else {
-        listObjPtr = Jim_NewListObj(interp, argv, argc);
-    }
+    listObjPtr = Jim_NewListObj(interp, argv, argc);
     if (*msg) {
         Jim_ListAppendElement(interp, listObjPtr, Jim_NewStringObj(interp, msg, -1));
     }
@@ -12587,55 +12687,24 @@ static int Jim_TailcallCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const 
     return JIM_EVAL;
 }
 
-static int JimAliasCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
-{
-    int retcode;
-    Jim_Obj *cmdList;
-    Jim_Obj *prefixListObj = Jim_CmdPrivData(interp);
-    Jim_Obj *saveRewriteNameObj = interp->rewriteNameObj;
-
-    interp->rewriteNameObj = argv[0];
-    interp->rewriteNameCount = Jim_ListLength(interp, prefixListObj);
-
-    /* prefixListObj is a list to which the args need to be appended */
-    cmdList = Jim_DuplicateObj(interp, prefixListObj);
-    ListInsertElements(cmdList, -1, argc - 1, argv + 1);
-    Jim_IncrRefCount(cmdList);
-
-    retcode = JimEvalObjList(interp, cmdList);
-
-    Jim_DecrRefCount(interp, cmdList);
-    interp->rewriteNameObj = saveRewriteNameObj;
-
-    return retcode;
-}
-
-static void JimAliasCmdDelete(Jim_Interp *interp, void *privData)
-{
-    Jim_Obj *prefixListObj = privData;
-    Jim_DecrRefCount(interp, prefixListObj);
-}
-
+/* [alias] */
 static int Jim_AliasCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    Jim_Obj *prefixListObj;
     const char *newname;
 
     if (argc < 3) {
         Jim_WrongNumArgs(interp, 1, argv, "newname command ?args ...?");
         return JIM_ERR;
     }
+    if (JimValidName(interp, "alias", argv[1]) != JIM_OK)
+        return JIM_ERR;
 
-    prefixListObj = Jim_NewListObj(interp, argv + 2, argc - 2);
-    Jim_IncrRefCount(prefixListObj);
     newname = Jim_String(argv[1]);
-    if (newname[0] == ':' && newname[1] == ':') {
+    if (newname[0] == ':' && newname[1] == ':')
         newname += 2;
-    }
 
     Jim_SetResult(interp, argv[1]);
-
-    return Jim_CreateCommand(interp, newname, JimAliasCmd, prefixListObj, JimAliasCmdDelete);
+    return Jim_CreateAlias(interp, newname, argc - 2, argv + 2);
 }
 
 /* [proc] */
@@ -13724,6 +13793,7 @@ static int Jim_InfoCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *arg
 
         case INFO_ALIAS:{
             Jim_Cmd *cmdPtr;
+            JimAlias *alias;
 
             if (argc != 3) {
                 Jim_WrongNumArgs(interp, 2, argv, "command");
@@ -13732,11 +13802,13 @@ static int Jim_InfoCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *arg
             if ((cmdPtr = Jim_GetCommand(interp, argv[2], JIM_ERRMSG)) == NULL) {
                 return JIM_ERR;
             }
-            if (cmdPtr->isproc || cmdPtr->u.native.cmdProc != JimAliasCmd) {
+            if (cmdPtr->isproc || cmdPtr->u.native.cmdProc != JimAliasCmdProc) {
                 Jim_SetResultFormatted(interp, "command \"%#s\" is not an alias", argv[2]);
                 return JIM_ERR;
             }
-            Jim_SetResult(interp, (Jim_Obj *)cmdPtr->u.native.privData);
+
+            alias = cmdPtr->u.native.privData;
+            Jim_SetResult(interp, Jim_NewListObj(interp, alias->objv, alias->objc));
             return JIM_OK;
         }
 
@@ -14709,6 +14781,13 @@ void Jim_SetResultFormatted(Jim_Interp *interp, const char *format, ...)
 int Jim_PackageProvide(Jim_Interp *interp, const char *name, const char *ver, int flags)
 {
     return JIM_OK;
+}
+#endif
+#ifndef jim_ext_ensemble
+Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv, int *lenPtr)
+{
+    *lenPtr = 1;
+    return objv[0];
 }
 #endif
 #ifndef jim_ext_aio
