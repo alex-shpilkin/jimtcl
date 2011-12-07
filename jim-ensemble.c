@@ -142,7 +142,7 @@ Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
     JimEnsemble *base;
 
     i = 0;
-    subObj = objv[0];
+    cmdObj = subObj = objv[0];
 
     while (1) {
         if (subObj != NULL)

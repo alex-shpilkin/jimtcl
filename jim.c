@@ -3862,10 +3862,10 @@ Jim_Obj *Jim_ResolveAlias(Jim_Interp *interp, Jim_Obj *cmdObj)
         Jim_DecrRefCount(interp, alias->target);
 
     target = Jim_ResolvePrefix(interp, alias->objc, alias->objv, &count);
-    if (count != alias->objc)
+    if (count != alias->objc) {
         target = cmdObj;
-
-    if (target != NULL) {
+    }
+    else if (target != NULL) {
         alias->procEpoch = interp->procEpoch;
         alias->target = target;
         Jim_IncrRefCount(alias->target);
