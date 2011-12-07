@@ -10,9 +10,12 @@
 
 #define JimSelectorValue(o) ((JimSelector *)((o)->internalRep.ptr))
 
+typedef struct JimEnsemble JimEnsemble;
+
 typedef struct JimSelector {
     int refCount;
-    long magic;
+    unsigned long procEpoch;
+    JimEnsemble *base;
     Jim_Obj *cmdObj;
 } JimSelector;
 
@@ -45,7 +48,6 @@ static Jim_ObjType selectorObjType = {
  * ------------------------------------------------------------------------ */
 
 typedef struct JimEnsemble {
-    long magic;
     Jim_Obj *unknownSel, *itselfSel;
 } JimEnsemble;
 
@@ -77,7 +79,10 @@ static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
     Jim_Obj *cmdObj;
     JimSelector *sel;
 
-    if (selObj->typePtr == &selectorObjType && JimSelectorValue(selObj)->magic == base->magic) {
+    if (selObj->typePtr == &selectorObjType &&
+        JimSelectorValue(selObj)->procEpoch == interp->procEpoch &&
+        JimSelectorValue(selObj)->base == base)
+    {
         cmdObj = JimSelectorValue(selObj)->cmdObj;
         if (Jim_GetCommand(interp, cmdObj, flags) != NULL) {
             return cmdObj;
@@ -109,7 +114,8 @@ static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
     selObj->internalRep.ptr = sel = Jim_Alloc(sizeof(JimSelector));
 
     sel->refCount = 1;
-    sel->magic = base->magic;
+    sel->procEpoch = interp->procEpoch;
+    sel->base = base;
     sel->cmdObj = cmdObj; /* transfer ownership */
 
     return cmdObj;
@@ -215,7 +221,6 @@ static void JimEnsembleDelProc(Jim_Interp *interp, void *privData)
 int Jim_CreateEnsemble(Jim_Interp *interp, const char *name)
 {
     JimEnsemble *ens = Jim_Alloc(sizeof(JimEnsemble));
-    ens->magic = Jim_GetId(interp);
     ens->unknownSel = ens->itselfSel = NULL;
 
     Jim_CreateCommand(interp, name, JimEnsembleCmdProc, ens, JimEnsembleDelProc);
