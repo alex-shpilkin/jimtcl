@@ -1,0 +1,56 @@
+source [file dirname [info script]]/testing.tcl
+
+needs constraint jim
+testConstraint ensemble [exists -command ensemble]
+needs constraint ensemble
+
+test ensemble-1.1 "One-level ensemble" {
+    ensemble thinker
+    proc {thinker answer} {} {return 42}
+    thinker answer
+} {42}
+
+test ensemble-1.2 "Two-level ensemble" {
+    ensemble {thinker action}
+    proc {thinker action current} {} {return "watching TV"}
+    thinker action current
+} {watching TV}
+
+test ensemble-1.3 "Pass arguments to ensemble" {
+    proc {thinker list} args {return $args}
+    thinker list 1 2 3
+} {1 2 3}
+
+test ensemble-1.4 "Rename ensemble" -body {
+    set sel answer
+    thinker $sel
+    rename thinker computer
+    computer $sel
+} -returnCodes error -result {invalid command name "computer answer"}
+
+test ensemble-1.5 "Rename selector" {
+    rename {thinker answer} {computer answer}
+    computer $sel
+} {42}
+
+test ensemble-1.6 "Invoke ensemble via alias" {
+    alias thinker computer
+    thinker answer
+} {42}
+
+test ensemble-1.7 "Ensemble itself" {
+    proc {computer itself} {} {return "that's me"}
+    computer
+} {that's me}
+
+test ensemble-1.8 "Ensemble unknown" {
+    proc {computer unknown} args {return $args}
+    computer is right
+} {is right}
+
+test ensemble-1.9 "Ensemble itself via unknown" {
+    rename {computer itself} ""
+    computer
+} {itself}
+
+testreport
