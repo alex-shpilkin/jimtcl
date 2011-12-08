@@ -10,12 +10,10 @@
 
 #define JimSelectorValue(o) ((JimSelector *)((o)->internalRep.ptr))
 
-typedef struct JimEnsemble JimEnsemble;
-
 typedef struct JimSelector {
     int refCount;
     unsigned long procEpoch;
-    JimEnsemble *base;
+    Jim_Ensemble *base;
     Jim_Obj *cmdObj;
 } JimSelector;
 
@@ -47,31 +45,25 @@ static Jim_ObjType selectorObjType = {
  * Ensemble implementation
  * ------------------------------------------------------------------------ */
 
-typedef struct JimEnsemble {
-    Jim_Obj *unknownSel, *itselfSel;
-} JimEnsemble;
-
-static JimEnsemble *JimGetEnsemble(Jim_Interp *interp, Jim_Obj *cmdObj);
 static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
-    JimEnsemble *base, Jim_Obj *selObj, int flags);
+    Jim_Ensemble *base, Jim_Obj *selObj, int flags);
 
 static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv);
 static void JimEnsembleDelProc(Jim_Interp *interp, void *privData);
 
-/* Careful: this is only called when cmdObj is known to be an existing command */
-static JimEnsemble *JimGetEnsemble(Jim_Interp *interp, Jim_Obj *cmdObj)
+Jim_Ensemble *Jim_GetEnsemble(Jim_Interp *interp, Jim_Obj *cmdObj)
 {
     Jim_Cmd *cmd;
 
-    cmd = Jim_GetCommand(interp, cmdObj, 0);
-    if (cmd->isproc || cmd->u.native.cmdProc != JimEnsembleCmdProc)
+    cmd = Jim_GetCommand(interp, cmdObj, JIM_ERR);
+    if (!cmd || cmd->isproc || cmd->u.native.cmdProc != JimEnsembleCmdProc)
         return NULL;
 
     return cmd->u.native.privData;
 }
 
 static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
-    JimEnsemble *base, Jim_Obj *selObj, int flags)
+    Jim_Ensemble *base, Jim_Obj *selObj, int flags)
 {
     const char *selName;
     char *name;
@@ -139,7 +131,7 @@ Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
 {
     int i;
     Jim_Obj *cmdObj, *subObj;
-    JimEnsemble *base;
+    Jim_Ensemble *base;
 
     i = 0;
     cmdObj = subObj = objv[0];
@@ -151,7 +143,7 @@ Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
             break;
 
         cmdObj = subObj;
-        base = JimGetEnsemble(interp, cmdObj);
+        base = Jim_GetEnsemble(interp, cmdObj);
 
         i++;
         if (i >= objc || base == NULL)
@@ -168,7 +160,7 @@ static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv
 {
     int resolved;
     Jim_Obj *cmdObj;
-    JimEnsemble *base;
+    Jim_Ensemble *base;
 
     /* We're trying hard to lookup chained selectors without re-invoking the
      * interpreter. Jim_ResolvePrefix contains all the lookup logic except the
@@ -177,7 +169,7 @@ static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv
      */
 
     cmdObj = Jim_ResolvePrefix(interp, argc, argv, &resolved);
-    if ((base = JimGetEnsemble(interp, cmdObj)) != NULL) {
+    if ((base = Jim_GetEnsemble(interp, cmdObj)) != NULL) {
         if (resolved == argc) {
             if (base->itselfSel == NULL) {
                 base->itselfSel = Jim_NewStringObj(interp, "itself", -1);
@@ -208,7 +200,10 @@ static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv
 
 static void JimEnsembleDelProc(Jim_Interp *interp, void *privData)
 {
-    JimEnsemble *ens = privData;
+    Jim_Ensemble *ens = privData;
+
+    if (ens->delProc)
+        ens->delProc(interp, ens->privData);
 
     if (ens->unknownSel)
         Jim_DecrRefCount(interp, ens->unknownSel);
@@ -218,9 +213,11 @@ static void JimEnsembleDelProc(Jim_Interp *interp, void *privData)
     Jim_Free(ens);
 }
 
-int Jim_CreateEnsemble(Jim_Interp *interp, const char *name)
+int Jim_CreateEnsemble(Jim_Interp *interp, const char *name, void *privData, Jim_DelCmdProc delProc)
 {
-    JimEnsemble *ens = Jim_Alloc(sizeof(JimEnsemble));
+    Jim_Ensemble *ens = Jim_Alloc(sizeof(Jim_Ensemble));
+    ens->privData = privData;
+    ens->delProc = delProc;
     ens->unknownSel = ens->itselfSel = NULL;
 
     Jim_CreateCommand(interp, name, JimEnsembleCmdProc, ens, JimEnsembleDelProc);
@@ -236,7 +233,7 @@ static int JimEnsembleCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv
     }
 
     Jim_SetResult(interp, argv[1]);
-    return Jim_CreateEnsemble(interp, Jim_String(argv[1]));
+    return Jim_CreateEnsemble(interp, Jim_String(argv[1]), NULL, NULL);
 }
 
 int Jim_ensembleInit(Jim_Interp *interp)
