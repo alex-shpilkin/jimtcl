@@ -2216,7 +2216,7 @@ static const Jim_ObjType dictSubstObjType = {
 
 static void FreeInterpolatedInternalRep(Jim_Interp *interp, Jim_Obj *objPtr)
 {
-    Jim_DecrRefCount(interp, (Jim_Obj *)objPtr->internalRep.twoPtrValue.ptr2);
+    Jim_DecrRefCount(interp, objPtr->internalRep.dictSubstValue.indexObjPtr);
 }
 
 static const Jim_ObjType interpolatedObjType = {
@@ -2614,9 +2614,15 @@ static Jim_Obj *JimStringToLower(Jim_Interp *interp, Jim_Obj *strObjPtr)
 
     str = Jim_GetString(strObjPtr, &len);
 
+#ifdef JIM_UTF8
+    /* Case mapping can change the utf-8 length of the string.
+     * But at worst it will be by one extra byte per char
+     */
+    len *= 2;
+#endif
     buf = Jim_Alloc(len + 1);
     JimStrCopyUpperLower(buf, str, 0);
-    return Jim_NewStringObjNoAlloc(interp, buf, len);
+    return Jim_NewStringObjNoAlloc(interp, buf, -1);
 }
 
 static Jim_Obj *JimStringToUpper(Jim_Interp *interp, Jim_Obj *strObjPtr)
@@ -2631,9 +2637,15 @@ static Jim_Obj *JimStringToUpper(Jim_Interp *interp, Jim_Obj *strObjPtr)
 
     str = Jim_GetString(strObjPtr, &len);
 
+#ifdef JIM_UTF8
+    /* Case mapping can change the utf-8 length of the string.
+     * But at worst it will be by one extra byte per char
+     */
+    len *= 2;
+#endif
     buf = Jim_Alloc(len + 1);
     JimStrCopyUpperLower(buf, str, 1);
-    return Jim_NewStringObjNoAlloc(interp, buf, len);
+    return Jim_NewStringObjNoAlloc(interp, buf, -1);
 }
 
 static Jim_Obj *JimStringToTitle(Jim_Interp *interp, Jim_Obj *strObjPtr)
@@ -2647,6 +2659,12 @@ static Jim_Obj *JimStringToTitle(Jim_Interp *interp, Jim_Obj *strObjPtr)
     if (len == 0) {
         return strObjPtr;
     }
+#ifdef JIM_UTF8
+    /* Case mapping can change the utf-8 length of the string.
+     * But at worst it will be by one extra byte per char
+     */
+    len *= 2;
+#endif
     buf = p = Jim_Alloc(len + 1);
 
     str += utf8_tounicode(str, &c);
@@ -2654,7 +2672,7 @@ static Jim_Obj *JimStringToTitle(Jim_Interp *interp, Jim_Obj *strObjPtr)
 
     JimStrCopyUpperLower(p, str, 0);
 
-    return Jim_NewStringObjNoAlloc(interp, buf, len);
+    return Jim_NewStringObjNoAlloc(interp, buf, -1);
 }
 
 /* Similar to memchr() except searches a UTF-8 string 'str' of byte length 'len'
@@ -4575,10 +4593,8 @@ static void SetDictSubstFromAny(Jim_Interp *interp, Jim_Obj *objPtr)
         if (objPtr->typePtr == &interpolatedObjType) {
             /* An interpolated object in dict-sugar form */
 
-            const ScriptToken *token = objPtr->internalRep.twoPtrValue.ptr1;
-
-            varObjPtr = token[0].objPtr;
-            keyObjPtr = objPtr->internalRep.twoPtrValue.ptr2;
+            varObjPtr = objPtr->internalRep.dictSubstValue.varNameObjPtr;
+            keyObjPtr = objPtr->internalRep.dictSubstValue.indexObjPtr;
 
             Jim_IncrRefCount(varObjPtr);
             Jim_IncrRefCount(keyObjPtr);
@@ -6313,6 +6329,7 @@ void Jim_ListAppendList(Jim_Interp *interp, Jim_Obj *listPtr, Jim_Obj *appendLis
 {
     JimPanic((Jim_IsShared(listPtr), "Jim_ListAppendList called with shared object"));
     SetListFromAny(interp, listPtr);
+    SetListFromAny(interp, appendListPtr);
     Jim_InvalidateStringRep(listPtr);
     ListAppendList(listPtr, appendListPtr);
 }
@@ -6922,12 +6939,12 @@ void UpdateStringOfIndex(struct Jim_Obj *objPtr)
     int len;
     char buf[JIM_INTEGER_SPACE + 1];
 
-    if (objPtr->internalRep.indexValue >= 0)
-        len = sprintf(buf, "%d", objPtr->internalRep.indexValue);
-    else if (objPtr->internalRep.indexValue == -1)
+    if (objPtr->internalRep.intValue >= 0)
+        len = sprintf(buf, "%d", objPtr->internalRep.intValue);
+    else if (objPtr->internalRep.intValue == -1)
         len = sprintf(buf, "end");
     else {
-        len = sprintf(buf, "end%d", objPtr->internalRep.indexValue + 1);
+        len = sprintf(buf, "end%d", objPtr->internalRep.intValue + 1);
     }
     objPtr->bytes = Jim_Alloc(len + 1);
     memcpy(objPtr->bytes, buf, len + 1);
@@ -6991,7 +7008,7 @@ int SetIndexFromAny(Jim_Interp *interp, Jim_Obj *objPtr)
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(interp, objPtr);
     objPtr->typePtr = &indexObjType;
-    objPtr->internalRep.indexValue = idx;
+    objPtr->internalRep.intValue = idx;
     return JIM_OK;
 
   badindex:
@@ -7013,7 +7030,7 @@ int Jim_GetIndex(Jim_Interp *interp, Jim_Obj *objPtr, int *indexPtr)
     }
     if (objPtr->typePtr != &indexObjType && SetIndexFromAny(interp, objPtr) == JIM_ERR)
         return JIM_ERR;
-    *indexPtr = objPtr->internalRep.indexValue;
+    *indexPtr = objPtr->internalRep.intValue;
     return JIM_OK;
 }
 
@@ -7074,7 +7091,7 @@ int SetReturnCodeFromAny(Jim_Interp *interp, Jim_Obj *objPtr)
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(interp, objPtr);
     objPtr->typePtr = &returnCodeObjType;
-    objPtr->internalRep.returnCode = returnCode;
+    objPtr->internalRep.intValue = returnCode;
     return JIM_OK;
 }
 
@@ -7082,7 +7099,7 @@ int Jim_GetReturnCode(Jim_Interp *interp, Jim_Obj *objPtr, int *intPtr)
 {
     if (objPtr->typePtr != &returnCodeObjType && SetReturnCodeFromAny(interp, objPtr) == JIM_ERR)
         return JIM_ERR;
-    *intPtr = objPtr->internalRep.returnCode;
+    *intPtr = objPtr->internalRep.intValue;
     return JIM_OK;
 }
 
@@ -10013,8 +10030,8 @@ static Jim_Obj *JimInterpolateTokens(Jim_Interp *interp, const ScriptToken * tok
         && token[2].type == JIM_TT_VAR) {
         /* May be able to do fast interpolated object -> dictSubst */
         objPtr->typePtr = &interpolatedObjType;
-        objPtr->internalRep.twoPtrValue.ptr1 = (void *)token;
-        objPtr->internalRep.twoPtrValue.ptr2 = intv[2];
+        objPtr->internalRep.dictSubstValue.varNameObjPtr = token[0].objPtr;
+        objPtr->internalRep.dictSubstValue.indexObjPtr = intv[2];
         Jim_IncrRefCount(intv[2]);
     }
 
@@ -10331,7 +10348,7 @@ static void JimSetProcWrongArgs(Jim_Interp *interp, Jim_Obj *procNameObj, Jim_Cm
             }
             else {
                 /* We have plain args */
-                Jim_AppendString(interp, argmsg, "?argument ...?", -1);
+                Jim_AppendString(interp, argmsg, "?arg...?", -1);
             }
         }
         else {
