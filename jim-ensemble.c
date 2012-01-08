@@ -47,6 +47,11 @@ static Jim_ObjType selectorObjType = {
 
 static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
     Jim_Ensemble *base, Jim_Obj *selObj, int flags);
+static int JimRewriteAlias(Jim_Interp *interp, int *objcPtr,
+    Jim_Obj ***objvPtr);
+static Jim_Obj *JimUnknownSelector(Jim_Interp *interp, const char *baseName,
+    Jim_Ensemble *base);
+static void JimInsufficientArgs(Jim_Interp *interp, Jim_Obj *ensemble);
 
 static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv);
 static void JimEnsembleDelProc(Jim_Interp *interp, void *privData);
@@ -113,112 +118,180 @@ static Jim_Obj *JimResolveSelector(Jim_Interp *interp, const char *baseName,
     return cmdObj;
 }
 
-/* Performs selector lookups as long as they succeed. This is exactly the
- * action that can be performed easily without re-invoking the interpreter.
- * Assumes objc > 0. NB. It is correct to cache the result of this function
- * alongside a proc epoch value.
- *
- * Returns JIM_OK if something other than an ensemble command is encountered
- * or the whole chain is consumed; JIM_ERR if a selector for a valid ensemble
- * couldn't be resolved.
- *
- * On exit, *resolvedPtr contains the number of successful lookups, and
- * *cmdObjPtr the result of the last one.
- */
-
-Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
-    int *lengthPtr)
+static int JimRewriteAlias(Jim_Interp *interp, int *objcPtr,
+    Jim_Obj ***objvPtr)
 {
-    int i;
-    Jim_Obj *cmdObj, *subObj;
-    Jim_Ensemble *base;
+    int prefc;
+    Jim_Obj *const *prefv;
+    int objc = *objcPtr;
+    Jim_Obj **objv = *objvPtr;
 
-    i = 0;
-    cmdObj = subObj = objv[0];
+    if (Jim_ResolveAlias(interp, objv[0], &prefc, &prefv) != JIM_OK)
+        return JIM_ERR;
 
-    while (1) {
-        if (subObj != NULL)
-            subObj = Jim_ResolveAlias(interp, subObj);
-        if (subObj == NULL)
-            break;
-
-        cmdObj = subObj;
-        base = Jim_GetEnsemble(interp, cmdObj);
-
-        i++;
-        if (i >= objc || base == NULL)
-            break;
-
-        subObj = JimResolveSelector(interp, Jim_String(cmdObj), base, objv[i], JIM_ERRMSG);
+    if (prefc == 1) {
+        objv[0] = prefv[0];
+    }
+    else if (prefc > 0) {
+        objv = Jim_Realloc(objv, sizeof(*objv) * (prefc + objc - 1));
+        memmove(objv + prefc, objv + 1, sizeof(*objv) * (objc - 1));
+        memcpy(objv, prefv, sizeof(*objv) * prefc);
+        objc += prefc - 1;
     }
 
-    *lengthPtr = i;
-    return cmdObj;
+    *objcPtr = objc;
+    *objvPtr = objv;
+
+    return JIM_OK;
+}
+
+int Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
+    int *rescPtr, Jim_Obj ***resvPtr)
+{
+    int i, ridx, widx;
+    Jim_Obj **resv;
+    Jim_Obj *cmdObj;
+    Jim_Ensemble *base;
+    int ret;
+
+    ret = JIM_OK;
+
+    resv = Jim_Alloc(sizeof(*resv));
+    ridx = 0; widx = 1;
+    cmdObj = objv[0];
+
+    do {
+        resv[0] = cmdObj;
+        if ((ret = JimRewriteAlias(interp, &widx, &resv)) != JIM_OK)
+            break;
+        /* Consider it consumed now that we know it's an existing command */
+        ridx++;
+
+        base = Jim_GetEnsemble(interp, resv[0]);
+        if (base == NULL || widx > base->arity + 1)
+            break;
+
+        if (widx < base->arity + 1)
+            resv = Jim_Realloc(resv, sizeof(*resv) * (base->arity + 1));
+        for (i = widx - 1; ridx < objc && i < base->arity; i++) {
+            if (Jim_CompareStringImmediate(interp, objv[ridx], ".."))
+                ridx++;
+            else
+                resv[widx++] = objv[ridx++];
+        }
+
+        if (ridx == objc) {
+            /* Not enough arguments to get the selector */
+            break;
+        }
+
+        cmdObj = JimResolveSelector(interp, Jim_String(resv[0]), base, objv[ridx], JIM_ERRMSG);
+    } while (cmdObj);
+
+    objc -= ridx;
+    resv = Jim_Realloc(resv, sizeof(*resv) * (widx + objc));
+    memcpy(resv + widx, objv + ridx, sizeof(*resv) * objc);
+
+    *rescPtr = widx + objc;
+    *resvPtr = resv;
+
+    return ret;
+}
+
+static Jim_Obj *JimUnknownSelector(Jim_Interp *interp, const char *baseName,
+    Jim_Ensemble *base)
+{
+    if (base->unknown == NULL) {
+        base->unknown = Jim_NewStringObj(interp, "unknown", -1);
+        Jim_IncrRefCount(base->unknown);
+    }
+
+    return JimResolveSelector(interp, baseName, base, base->unknown, JIM_NONE);
+}
+
+static void JimInsufficientArgs(Jim_Interp *interp, Jim_Obj *ensemble)
+{
+    Jim_Ensemble *base;
+    Jim_Obj *obj, *listObj;
+
+    base = Jim_GetEnsemble(interp, ensemble);
+    listObj = Jim_NewListObj(interp, &ensemble, 1);
+
+    Jim_ListAppendList(interp, listObj, base->argList);
+    Jim_IncrRefCount(listObj);
+    obj = Jim_ListJoin(interp, listObj, " ", 1);
+    Jim_DecrRefCount(interp, listObj);
+
+    Jim_IncrRefCount(obj);
+    Jim_SetResultFormatted(interp, "wrong # args: should be \"%#s subcommand ?args ...?\"", 
+        obj, base->argList);
+    Jim_DecrRefCount(interp, obj);
 }
 
 static int JimEnsembleCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    int resolved;
-    Jim_Obj *cmdObj;
+    int resc;
+    Jim_Obj **resv;
+
+    int ret;
     Jim_Ensemble *base;
 
-    /* We're trying hard to lookup chained selectors without re-invoking the
-     * interpreter. Jim_ResolvePrefix contains all the lookup logic except the
-     * cases when [itself] or [unknown] need to be utilised, at which point we
-     * give up and recurse. NB. The computation down here is uncacheable.
+    /* NB. The computation down here is uncacheable, unlike the one in
+     * Jim_ResolvePrefix, because we wouldn't know when the [unknown] lookup
+     * becomes invalid.
      */
 
-    cmdObj = Jim_ResolvePrefix(interp, argc, argv, &resolved);
-    if ((base = Jim_GetEnsemble(interp, cmdObj)) != NULL) {
-        if (resolved == argc) {
-            if (base->itselfSel == NULL) {
-                base->itselfSel = Jim_NewStringObj(interp, "itself", -1);
-                Jim_IncrRefCount(base->itselfSel);
-            }
+    Jim_ResolvePrefix(interp, argc, argv, &resc, &resv);
 
-            /* The problem here is that [itself] may need to be handled by
-             * [unknown], so we don't try to perform any more lookups */
-
-            return Jim_EvalObjPrefix(interp, cmdObj, 1, &base->itselfSel);
+    if ((base = Jim_GetEnsemble(interp, resv[0])) != NULL) {
+        if (resc - 1 < base->arity + 1) {
+            JimInsufficientArgs(interp, resv[0]);
+            ret = JIM_ERR;
+            goto cleanup;
         }
         else {
-            if (base->unknownSel == NULL) {
-                base->unknownSel = Jim_NewStringObj(interp, "unknown", -1);
-                Jim_IncrRefCount(base->unknownSel);
+            resv[0] = JimUnknownSelector(interp, Jim_String(resv[0]), base);
+            if (resv[0] == NULL) {
+                ret = JIM_ERR;
+                goto cleanup;
             }
-
-            cmdObj = JimResolveSelector(interp, Jim_String(cmdObj), base, base->unknownSel, 0);
-            if (cmdObj != NULL)
-                return Jim_EvalObjPrefix(interp, cmdObj, argc - resolved, argv + resolved);
-            else
-                return JIM_ERR;
         }
     }
 
-    return Jim_EvalObjPrefix(interp, cmdObj, argc - resolved, argv + resolved);
+    ret = Jim_EvalObjVector(interp, resc, resv);
+
+  cleanup:
+    Jim_Free(resv);
+    return ret;
 }
 
 static void JimEnsembleDelProc(Jim_Interp *interp, void *privData)
 {
     Jim_Ensemble *ens = privData;
 
-    if (ens->delProc)
+    Jim_DecrRefCount(interp, ens->argList);
+    if (ens->delProc != NULL)
         ens->delProc(interp, ens->privData);
-
-    if (ens->unknownSel)
-        Jim_DecrRefCount(interp, ens->unknownSel);
-    if (ens->itselfSel)
-        Jim_DecrRefCount(interp, ens->itselfSel);
+    if (ens->unknown != NULL)
+        Jim_DecrRefCount(interp, ens->unknown);
 
     Jim_Free(ens);
 }
 
-int Jim_CreateEnsemble(Jim_Interp *interp, const char *name, void *privData, Jim_DelCmdProc delProc)
+int Jim_CreateEnsemble(Jim_Interp *interp, const char *name, Jim_Obj *argList, void *privData, Jim_DelCmdProc delProc)
 {
     Jim_Ensemble *ens = Jim_Alloc(sizeof(Jim_Ensemble));
+
+    if (argList != NULL)
+        ens->argList = argList;
+    else
+        ens->argList = interp->emptyObj;
+    Jim_IncrRefCount(ens->argList);
+    ens->arity = Jim_ListLength(interp, ens->argList);
+
     ens->privData = privData;
     ens->delProc = delProc;
-    ens->unknownSel = ens->itselfSel = NULL;
+    ens->unknown = NULL;
 
     Jim_CreateCommand(interp, name, JimEnsembleCmdProc, ens, JimEnsembleDelProc);
     return JIM_OK;
@@ -227,13 +300,14 @@ int Jim_CreateEnsemble(Jim_Interp *interp, const char *name, void *privData, Jim
 /* [ensemble] */
 static int JimEnsembleCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    if (argc != 2) {
+    if (argc < 2 || argc > 3) {
         Jim_WrongNumArgs(interp, 1, argv, "name");
         return JIM_ERR;
     }
 
     Jim_SetResult(interp, argv[1]);
-    return Jim_CreateEnsemble(interp, Jim_String(argv[1]), NULL, NULL);
+    return Jim_CreateEnsemble(interp, Jim_String(argv[1]),
+        argc > 2 ? argv[2] : NULL, NULL, NULL);
 }
 
 int Jim_ensembleInit(Jim_Interp *interp)

@@ -38,19 +38,9 @@ test ensemble-1.6 "Invoke ensemble via alias" {
     thinker answer
 } {42}
 
-test ensemble-1.7 "Ensemble itself" {
-    proc {computer itself} {} {return "that's me"}
-    computer
-} {that's me}
-
 test ensemble-1.8 "Ensemble unknown" {
     proc {computer unknown} args {return $args}
     computer is right
 } {is right}
-
-test ensemble-1.9 "Ensemble itself via unknown" {
-    rename {computer itself} ""
-    computer
-} {itself}
 
 testreport

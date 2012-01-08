@@ -3843,76 +3843,125 @@ int Jim_RenameCommand(Jim_Interp *interp, const char *oldName, const char *newNa
  * Command aliases
  * ---------------------------------------------------------------------------*/
 
-/* A complete alias is an alias that can be resolved to a _single_ existing
- * command via successful ensemble lookups and other aliases only. The
- * current implementation caches the real targets of complete aliases.
- */
-
 typedef struct JimAlias {
     int objc;
     Jim_Obj **objv;
 
     unsigned long procEpoch;
-    Jim_Obj *target;
+    int cachec;
+    Jim_Obj **cachev;
 } JimAlias;
 
 static int JimAliasCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv);
 static void JimAliasDelProc(Jim_Interp *interp, void *privData);
 
-Jim_Obj *Jim_ResolveAlias(Jim_Interp *interp, Jim_Obj *cmdObj)
+int Jim_ResolveAlias(Jim_Interp *interp, Jim_Obj *cmdObj, int *rescPtr,
+    Jim_Obj *const **resvPtr)
 {
     Jim_Cmd *cmd;
     JimAlias *alias;
-    int count;
-    Jim_Obj *target;
+
+    int i, objc;
+    Jim_Obj **objv;
 
     cmd = Jim_GetCommand(interp, cmdObj, JIM_ERR);
     if (cmd == NULL)
-        return NULL;
-    if (cmd->isproc || cmd->u.native.cmdProc != JimAliasCmdProc)
-        return cmdObj;
+        return JIM_ERR;
+    if (cmd->isproc || cmd->u.native.cmdProc != JimAliasCmdProc) {
+        *rescPtr = 0;
+        *resvPtr = NULL;
+        return JIM_OK;
+    }
 
     alias = cmd->u.native.privData;
-    if (alias->procEpoch == interp->procEpoch)
-        return alias->target;
-
-    if (alias->target != NULL)
-        Jim_DecrRefCount(interp, alias->target);
-
-    target = Jim_ResolvePrefix(interp, alias->objc, alias->objv, &count);
-    if (count != alias->objc) {
-        target = cmdObj;
+    if (alias->procEpoch == interp->procEpoch) {
+        *rescPtr = alias->cachec;
+        *resvPtr = alias->cachev;
+        return JIM_OK;
     }
-    else if (target != NULL) {
+
+    if (alias->cachev != NULL) {
+        for (i = 0; i < alias->cachec; i++)
+            Jim_DecrRefCount(interp, alias->cachev[i]);
+        Jim_Free(alias->cachev);
+        alias->cachev = NULL;
+    }
+
+    if (Jim_ResolvePrefix(interp, alias->objc, alias->objv, &objc, &objv) == JIM_OK) {
         alias->procEpoch = interp->procEpoch;
-        alias->target = target;
-        Jim_IncrRefCount(alias->target);
+
+        *rescPtr = alias->cachec = objc;
+        *resvPtr = alias->cachev = objv;
+        for (i = 0; i < objc; i++)
+            Jim_IncrRefCount(objv[i]);
+
+        return JIM_OK;
+    }
+    else {
+        Jim_Free(objv);
+        return JIM_ERR;
+    }
+}
+
+#ifndef jim_ext_ensemble
+int Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv,
+    int *rescPtr, Jim_Obj ***resvPtr)
+{
+    int retcode;
+    int resc;
+    Jim_Obj **resv;
+    int prefc;
+    Jim_Obj *const *prefv;
+
+    resc = objc;
+    resv = Jim_Alloc(sizeof(*resv) * resc);
+    memcpy(resv, objv, sizeof(*resv) * objc);
+
+    for (;;) {
+        retcode = Jim_ResolveAlias(interp, resv[0], &prefc, &prefv);
+        if (retcode != JIM_OK || prefc == 0)
+            break;
+
+        if (prefc == 1) {
+            resv[0] = prefv[0];
+        }
+        else {
+            resv = Jim_Realloc(resv, sizeof(*resv) * (prefc + resc - 1));
+            memmove(resv + 1, resv + prefc, sizeof(*resv) * (resc - 1));
+            memcpy(resv, prefv, sizeof(*resv) * prefc);
+            resc += prefc - 1;
+        }
     }
 
-    return target;
+    *rescPtr = resc;
+    *resvPtr = resv;
+    return retcode;
 }
+#endif
 
 int JimAliasCmdProc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    Jim_Obj *cmdObj;
+    int prefc;
+    Jim_Obj *const *prefv;
+    int objc;
+    Jim_Obj **objv;
+    int ret;
 
-    cmdObj = Jim_ResolveAlias(interp, argv[0]);
-    if (cmdObj != NULL && cmdObj != argv[0]) {
-        return Jim_EvalObjPrefix(interp, cmdObj, argc - 1, argv + 1);
-    }
-    else {
-        /* Note that we can end up in an [unknown] handler */
+    if (Jim_ResolveAlias(interp, argv[0], &prefc, &prefv) != JIM_OK) {
         JimAlias *alias = Jim_CmdPrivData(interp);
-
-        int objc;
-        Jim_Obj **objv;
-
-        objc = alias->objc + argc - 1;
-        objv = Jim_Alloc(objc * sizeof(Jim_Obj *));
-        memcpy(objv, alias->objv, alias->objc * sizeof(Jim_Obj *));
-        memcpy(objv + alias->objc, argv + 1, (argc - 1) * sizeof(Jim_Obj *));
-        return Jim_EvalObjVector(interp, objc, objv);
+        prefc = alias->objc;
+        prefv = alias->objv;
     }
+
+    objc = prefc + argc - 1;
+    objv = Jim_Alloc(sizeof(*objv) * objc);
+    memcpy(objv, prefv, sizeof(*objv) * prefc);
+    memcpy(objv + prefc, argv + 1, sizeof(*objv) * (argc - 1));
+
+    ret = Jim_EvalObjVector(interp, objc, objv);
+
+    Jim_Free(objv);
+    return ret;
 }
 
 void JimAliasDelProc(Jim_Interp *interp, void *privData)
@@ -3924,8 +3973,11 @@ void JimAliasDelProc(Jim_Interp *interp, void *privData)
         Jim_DecrRefCount(interp, alias->objv[i]);
     Jim_Free(alias->objv);
 
-    if (alias->target)
-        Jim_DecrRefCount(interp, alias->target);
+    if (alias->cachev) {
+        for (i = 0; i < alias->cachec; i++)
+            Jim_DecrRefCount(interp, alias->cachev[i]);
+        Jim_Free(alias->cachev);
+    }
 
     Jim_Free(alias);
 }
@@ -3939,7 +3991,7 @@ int Jim_CreateAlias(Jim_Interp *interp, const char *cmdName, int objc, Jim_Obj *
 
     alias = Jim_Alloc(sizeof(JimAlias));
     alias->procEpoch = 0;
-    alias->target = NULL;
+    alias->cachev = NULL;
 
     alias->objc = objc;
     alias->objv = Jim_Alloc(objc * sizeof(Jim_Obj *));
@@ -14798,13 +14850,6 @@ void Jim_SetResultFormatted(Jim_Interp *interp, const char *format, ...)
 int Jim_PackageProvide(Jim_Interp *interp, const char *name, const char *ver, int flags)
 {
     return JIM_OK;
-}
-#endif
-#ifndef jim_ext_ensemble
-Jim_Obj *Jim_ResolvePrefix(Jim_Interp *interp, int objc, Jim_Obj *const *objv, int *lenPtr)
-{
-    *lenPtr = 1;
-    return objv[0];
 }
 #endif
 #ifndef jim_ext_aio

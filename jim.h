@@ -3,7 +3,7 @@
  * Copyright 2005 Salvatore Sanfilippo <antirez@invece.org>
  * Copyright 2005 Clemens Hintze <c.hintze@gmx.net>
  * Copyright 2005 patthoyts - Pat Thoyts <patthoyts@users.sf.net>
- * Copyright 2008 oharboe - Øyvind Harboe - oyvind.harboe@zylin.com
+ * Copyright 2008 oharboe - Ã˜yvind Harboe - oyvind.harboe@zylin.com
  * Copyright 2008 Andrew Lunn <andrew@lunn.ch>
  * Copyright 2008 Duane Ellis <openocd@duaneellis.com>
  * Copyright 2008 Uwe Klein <uklein@klein-messgeraete.de>
@@ -647,10 +647,11 @@ JIM_EXPORT int Jim_EvalObjPrefix(Jim_Interp *interp, Jim_Obj *prefix,
 JIM_EXPORT int Jim_SubstObj (Jim_Interp *interp, Jim_Obj *substObjPtr,
         Jim_Obj **resObjPtrPtr, int flags);
 
-/* lookup */
-JIM_EXPORT Jim_Obj *Jim_ResolveAlias (Jim_Interp *interp, Jim_Obj *cmdObj);
-JIM_EXPORT Jim_Obj *Jim_ResolvePrefix (Jim_Interp *interp, int objc,
-    Jim_Obj *const *objv, int *lengthPtr);
+/* caching */
+JIM_EXPORT int Jim_ResolveAlias (Jim_Interp *interp, Jim_Obj *aliasObj,
+    int *rescPtr, Jim_Obj *const **resvPtr);
+JIM_EXPORT int Jim_ResolvePrefix (Jim_Interp *interp, int objc,
+    Jim_Obj *const *objv, int *rescPtr, Jim_Obj ***resvPtr);
 
 /* stack */
 JIM_EXPORT void Jim_InitStack(Jim_Stack *stack);
