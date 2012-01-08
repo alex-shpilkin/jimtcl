@@ -38,9 +38,60 @@ test ensemble-1.6 "Invoke ensemble via alias" {
     thinker answer
 } {42}
 
+test ensemble-1.7 "Insufficient args for ensemble" -body {
+    proc {computer itself} {} {return "that's me"}
+    computer
+} -returnCodes error -result {wrong # args: should be "computer subcommand ?args ...?"}
+
 test ensemble-1.8 "Ensemble unknown" {
     proc {computer unknown} args {return $args}
     computer is right
 } {is right}
+
+# Omitted: ensemble-1.9
+
+test ensemble-2.1 "Prepositional ensemble args" {
+    ensemble animal: self
+    proc {animal: self} {self} {set self}
+    animal: frog self
+} {frog}
+
+test ensemble-2.2 "Multiple prepositional args" {
+    ensemble triple {first second third}
+    proc {triple reversed} {first second third} {list $third $second $first}
+    triple 1 2 3 reversed
+} {3 2 1}
+
+test ensemble-2.4 "Both types of arguments" {
+    ensemble triple {first second}
+    triple 1 2 reversed 3
+} {3 2 1}
+
+test ensemble-2.3 "Prepositional args via alias" {
+    alias frog animal: frog
+    frog self
+} {frog}
+
+test ensemble-2.3 "Prepositional placeholders" {
+    animal: .. self frog
+} {frog}
+
+test ensemble-2.4 "Placeholders via cascading lookup" {
+    ensemble dog: self
+    alias {dog: self} animal: .. self
+    alias spot dog: spot
+    spot self
+} {spot}
+
+test ensemble-2.6 "Non-placeholder after placeholder" {
+    # FIXME This should probably change.
+    triple .. 1 reversed 2 3
+} {3 2 1}
+
+test ensemble-2.5 "Nested ensembles with args" {
+    ensemble {dog: tail:} {dog self}
+    proc {dog: tail: wag} {dog self} {return "[string totitle $dog] wags its $self"}
+    spot tail: tail wag
+} {Spot wags its tail}
 
 testreport
