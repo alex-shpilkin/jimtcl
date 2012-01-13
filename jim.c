@@ -3864,6 +3864,12 @@ int Jim_ResolveAlias(Jim_Interp *interp, Jim_Obj *cmdObj, int *rescPtr,
     int i, objc;
     Jim_Obj **objv;
 
+    if (interp->evalDepth == interp->maxEvalDepth) {
+        Jim_SetResultString(interp, "Infinite eval recursion", -1);
+        return JIM_ERR;
+    }
+    interp->evalDepth++;
+
     cmd = Jim_GetCommand(interp, cmdObj, JIM_ERR);
     if (cmd == NULL)
         return JIM_ERR;
